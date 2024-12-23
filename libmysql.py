@@ -4,6 +4,7 @@ import pandas as pd
 from sys import getsizeof
 import numpy as np
 from mysql.connector.constants import FieldType
+import re
 
 
 class db_connection():
@@ -60,98 +61,106 @@ class db_connection():
         self.connection.close()
         print('Connection closed')
 
+    def _field_length(self, column_type):
+        num = re.findall(r'\d+', column_type)
+        if num:
+            return int(num[0])
+        else:
+            return 1
 
-    def estimated_query_size(self, query, cursor):
-        """
-        Estimates approximate size of data fetched by query.
-        Test how to work with joins. (wrong)
-        """
+    def _size_of_one_row(self, query, cursor):
 
-        """
-        #count number of rows
-        try:
-            cursor.execute(query)
-            print(f"cursor.description: {cursor.description}")
-            row_count = cursor.rowcount
-            print(f'rows_num: {row_count}')
-        except Error as er:
-            print(er)
-    
-            #count number of columns
-        try:
-            
-            cursor.execute(query)
-            column_count = len(cursor.description)
-            print(f"cursor.description: {cursor.description}")
-            columns = [FieldType.get_info(col[1]) for col in cursor.description]
-            print(f"Number of columns: {column_count}")
-        except Error as er:
-            print(er)
-
-        """
-
-        try:
-            create_temp_table_query = """
+        create_temp_table_query = """
                 CREATE TEMPORARY TABLE temp_table AS
                 """
-            cursor.execute(create_temp_table_query+query)
+        cursor.execute(create_temp_table_query+query)
 
-            show_columns_query = "SHOW COLUMNS FROM temp_table;"
-            cursor.execute(show_columns_query)
+        show_columns_query = "SHOW COLUMNS FROM temp_table;"
+        cursor.execute(show_columns_query)
 
-            # Вывод информации о столбцах
-            columns_info = cursor.fetchall()
-            for column in columns_info:
-                print(f"Field: {column[0]}, Type: {column[1]}, Null: {column[2]}, Key: {column[3]}, Default: {column[4]}, Extra: {column[5]}")
-        except Error as er:
-            print(er)
-
-        estimated_size = 0
-
-        """
         total_size = 0
-        for column in columns:
-            column_type = column.lower()
+        columns_info = cursor.fetchall()
+        # types of columns and their size
+
+        for column in columns_info:
+            column_type = column[1].lower()
+            print(column_type)
             if 'int' in column_type:
-                total_size += 4
-            elif 'char' in column_type or 'text' in column_type:
-                length = int(column_type.split('(')[1].split(')')[0])
+                length = self._field_length(column_type)
+                total_size += 4 * length
+            elif 'char' in column_type or 'varchar' in column_type:
+                length = self._field_length(column_type)
                 total_size += length
             elif 'double' in column_type or 'float' in column_type:
-                total_size += 8
+                length = self._field_length(column_type)
+                total_size += 8 * length
             elif 'date' in column_type:
                 total_size += 3
             elif 'timestamp' in column_type:
                 total_size += 4
             elif 'year' in column_type:
                 total_size += 1
-            elif 'blob' in column_type:
-                length = int(column_type.split('(')[1].split(')')[0])
-                total_size += length
+            elif 'blob' in column_type or 'text' in column_type:
+                total_size += 65535 # Maximum size for BLOB or TEXT type
+
+        return total_size
     
-        estimated_size = total_size * row_count
+    def _num_of_rows(self, cursor):
+        row_count = 1
+        count_query = """
+                      SELECT COUNT(*) FROM temp_table;
+                      """
+        cursor.execute(count_query)
+            
+        row_count = cursor.fetchone()[0]
+        return row_count
+        
+
+    def estimated_query_size(self, query, cursor):
         """
+        Estimates maximum size of data fetched by query.
+        Test how to work with joins. (wrong)
+        """
+        estimated_size = 0
+
+        try:
+            
+            total_size = self._size_of_one_row(query, cursor)
+            print(f'total size: {total_size}')
+        except Error as er:
+            print(er)
+
+        #count number of rows
+        try:
+            row_count = self._num_of_rows(cursor)
+            print(f'rows_num: {row_count}')
+        except Error as er:
+            print(er)
+
+        estimated_size = total_size * row_count
+
+        print(f'estimated size; {estimated_size}')
+        
         return estimated_size
 
-    def print_info(self, query, cursor, limit=1024*1024):
+    def _print_info(self, query, cursor, limit=1024*1024):
         """
         Prints data fetched from a query if its size < {limit} size,
         default limit = 1 Mbytes
         """
         size_query = self.estimated_query_size(query, cursor)
-        results = cursor.execute(query).fetchall()
         
-        print(size_query)
+        print(f'size query: {size_query}')
         
-        #for row in results:
-        #   print(row)
-        #if size_query < limit:
-        for row in results:
-            print(row)
-        #else:
-        #    print('Too much data to print')
+        if size_query < limit:
+            cursor.execute(query)
+            results = cursor.fetchall()
+            for row in results:
+                print(row)
+        else:
+            print('Too much data to print')
 
-    def write_to_df(self, query, cursor, limit=1024*1024):
+    def _write_to_df(self, query, cursor, limit=1024*1024):
         """
         Writes data to a dataframe
         if its size < {limit} size,
@@ -159,15 +168,15 @@ class db_connection():
         """
 
         #results = cursor.fetchall()
-        #size_query = self.estimated_query_size(query, cursor)
+        size_query = self.estimated_query_size(query, cursor)
 
-        rows = cursor.fetchall()
-        results = pd.DataFrame(rows)
-        #if size_query < limit:
-
-        #else:
-        #    print('Too much data to print')
-        return results
+        if size_query < limit:
+            rows = cursor.fetchall()
+            results = pd.DataFrame(rows)
+            return results
+        else:
+            print('Too much data to print')
+        return -100
 
 
     def display_query(self, query, param):
@@ -181,10 +190,10 @@ class db_connection():
             with self.connection.cursor() as cursor:
                 #cursor.execute(query)
                 if param == 'print':
-                    self.print_info(query, cursor)
+                    self._print_info(query, cursor)
                     return 1
                 if param == 'dataframe':
-                    return self.write_to_df(query, cursor)
+                    return self._write_to_df(query, cursor)
         except Error as er:
             print(er)
             return -100
