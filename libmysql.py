@@ -3,6 +3,7 @@ from mysql.connector import connect, Error
 import pandas as pd
 from sys import getsizeof
 import numpy as np
+from mysql.connector.constants import FieldType
 
 
 class db_connection():
@@ -16,6 +17,7 @@ class db_connection():
             .execute_query_ch(query) - for queries making changes,
             ends with commit
             .display_query(query) - for showing some info queries
+            .display_info(query) - to print simple info like show, describe
 
     """
     def __init__(self, host_='localhost', database_=''):
@@ -35,6 +37,7 @@ class db_connection():
                 print(f' Database: {self.database}')
                 self.connection = connect(host=self.host, user=self.user,\
                                       password=self.password, database=self.database)
+                print(f'You\'ve successfully connected to {self.database}.')
             else:
                 self.connection = connect(host=self.host, user=self.user,\
                                       password=self.password)
@@ -63,28 +66,52 @@ class db_connection():
         Estimates approximate size of data fetched by query.
         Test how to work with joins. (wrong)
         """
+
+        """
         #count number of rows
         try:
-            count_query = f"SELECT COUNT(*) FROM ({query}) AS count_query"
-            cursor.execute(count_query)
-            row_count = cursor.fetchone()[0]
+            cursor.execute(query)
+            print(f"cursor.description: {cursor.description}")
+            row_count = cursor.rowcount
             print(f'rows_num: {row_count}')
         except Error as er:
             print(er)
     
-        #count number of columns
+            #count number of columns
         try:
-            base_table = query.split('FROM')[1].split()[0]  # Extract the table name from the query
-            cursor.execute(f"DESCRIBE {base_table}")
-            columns = cursor.fetchall()
-            print(f'columns_num: {len(columns)}')
+            
+            cursor.execute(query)
+            column_count = len(cursor.description)
+            print(f"cursor.description: {cursor.description}")
+            columns = [FieldType.get_info(col[1]) for col in cursor.description]
+            print(f"Number of columns: {column_count}")
         except Error as er:
             print(er)
-    
-    
+
+        """
+
+        try:
+            create_temp_table_query = """
+                CREATE TEMPORARY TABLE temp_table AS
+                """
+            cursor.execute(create_temp_table_query+query)
+
+            show_columns_query = "SHOW COLUMNS FROM temp_table;"
+            cursor.execute(show_columns_query)
+
+            # Вывод информации о столбцах
+            columns_info = cursor.fetchall()
+            for column in columns_info:
+                print(f"Field: {column[0]}, Type: {column[1]}, Null: {column[2]}, Key: {column[3]}, Default: {column[4]}, Extra: {column[5]}")
+        except Error as er:
+            print(er)
+
+        estimated_size = 0
+
+        """
         total_size = 0
         for column in columns:
-            column_type = column[1].lower()
+            column_type = column.lower()
             if 'int' in column_type:
                 total_size += 4
             elif 'char' in column_type or 'text' in column_type:
@@ -103,7 +130,7 @@ class db_connection():
                 total_size += length
     
         estimated_size = total_size * row_count
-    
+        """
         return estimated_size
 
     def print_info(self, query, cursor, limit=1024*1024):
@@ -111,31 +138,57 @@ class db_connection():
         Prints data fetched from a query if its size < {limit} size,
         default limit = 1 Mbytes
         """
-        results = cursor.fetchall()
         size_query = self.estimated_query_size(query, cursor)
+        results = cursor.execute(query).fetchall()
+        
+        print(size_query)
         
         #for row in results:
         #   print(row)
-        if size_query < limit:
-            for row in results:
-                print(row)
-        else:
-            print('Too much data to print')
+        #if size_query < limit:
+        for row in results:
+            print(row)
+        #else:
+        #    print('Too much data to print')
+
+    def write_to_df(self, query, cursor, limit=1024*1024):
+        """
+        Writes data to a dataframe
+        if its size < {limit} size,
+        default limit = 1 Mbytes
+        """
+
+        #results = cursor.fetchall()
+        #size_query = self.estimated_query_size(query, cursor)
+
+        rows = cursor.fetchall()
+        results = pd.DataFrame(rows)
+        #if size_query < limit:
+
+        #else:
+        #    print('Too much data to print')
+        return results
+
 
     def display_query(self, query, param):
         """
         Displays the results of select-queries.
         Two options how to display:
         - print to a terminal (if size of query data < 1 Mbytes)
-        - write to a dataframe (if size of query data < 10 Gbytes)(not implemented)
+        - write to a dataframe (if size of query data < 10 Gbytes)
         """
         try:
             with self.connection.cursor() as cursor:
-                cursor.execute(query)
+                #cursor.execute(query)
                 if param == 'print':
                     self.print_info(query, cursor)
+                    return 1
+                if param == 'dataframe':
+                    return self.write_to_df(query, cursor)
         except Error as er:
             print(er)
+            return -100
+        return 0
 
     def display_info(self, query):
         """
@@ -150,24 +203,43 @@ class db_connection():
         except Error as er:
             print(er)
 
-    def execute_query_ch(self, query):
+    def execute_query_ch(self, query, params=None):
+        """
+        Makes changes with a table or a database,
+        ends with .commit()
+        """
         try:
             with self.connection.cursor() as cursor:
-                cursor.execute(query)
+                cursor.execute(query, params)
                 self.connection.commit()
         except Error as er:
             print(er)
 
-
-conn = db_connection(database_='gergs_list')
-select_query = """
+if __name__ == '__main__':
+    conn = db_connection(database_='testdb')
+    select_query = """
                 SELECT *
-                FROM doughnut_list
+                FROM test_table
                """
 
 
-print('merged?')
-conn.display_query(select_query, param='print')
-conn.display_info('DESCRIBE doughnut_list')
+    print('display')
+    print('print')
+    conn.display_query(select_query, param='print')
+
+    """
+    print('dataframe')
+    df = conn.display_query(select_query, param='dataframe')
+    print(df)
+    conn.display_info('DESCRIBE test_table')
+    print('alter')
+    execute_query = """
+    #        INSERT INTO test_table (name, age, email) VALUES
+    #        (%s, %s, %s)
+    """
+    data = ('Mark', 25, 'mark@mail.com')
+    conn.execute_query_ch(execute_query,  data)
+    conn.display_query(select_query, param='print')
+    """
 
 
