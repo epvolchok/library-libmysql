@@ -6,6 +6,11 @@ import sys
 import atexit
 
 def try_except_decorator(func):
+    """
+    A try-except structure wrapper to control correct operation performance
+    with a database and its tables. If something goes wrong the connection is closed
+    and the programm is termonated.
+    """
     def wrapper(self, *args, **kwargs):
         try:
             return func(self, *args, **kwargs)
@@ -17,15 +22,19 @@ def try_except_decorator(func):
 class db_connection():
     """
         Connects to the (local, default) mysql-server
-        using user name and password entered from keyboard
+        using a user name and password entered from keyboard
         to create and change databases/tables, write queries.
             __init__ - creates connection:
             __del__ - closes the connection
             .close_connection() - closes connection manually
             .execute_query_ch(query) - for queries making changes,
             ends with commit
-            .display_query(query) - for showing some info queries
+            .display_query(query, param, estsize=False, limit=None)
+            - for showing results of queries, writes to a terminal or pandas dataframe.
+            If estsize is True it compares the estimated size of the query with a
+            limit before printing.
             .display_info(query) - to print simple info like show, describe
+            .use_database(database) - to choose or change a database
 
     """
 
@@ -37,8 +46,8 @@ class db_connection():
         """
 
         self.host = host_
-        self.user = input("User name: ")
-        self.password = getpass("password: ")
+        self.user = input('User name: ')
+        self.password = getpass('password: ')
         self.database = database_
         self.connection = None
 
@@ -76,7 +85,7 @@ class db_connection():
                 self.connection.close()
                 print('Connection closed.')
             except Exception as close_error:
-                print(f"Error during connection closure: {close_error}")
+                print(f'Error during connection closure: {close_error}')
             self.connection = None  # Deletes a link to the connection object
 
     @try_except_decorator
@@ -86,35 +95,39 @@ class db_connection():
         """
         with self.connection.cursor() as cursor:
             self.database = database
-            cursor.execute("USE "+database)
+            cursor.execute('USE '+database)
             print(f'You\'ve successfully connected to {self.database}.')
 
 
-    def estimated_query_size(self, query, cursor):
+    def _estimated_query_size(self, query, cursor):
         """
         Estimates maximum size of data fetched by the query.
-        Test how to work with joins?
+
         """
         estimated_size = 0
 
         # approximately weights the size of one row
         total_size = self._size_of_one_row(query, cursor)
-        print(f'Size of one row: {total_size}')
+        #print(f'Size of one row: {total_size}')
         
 
         #count the number of rows
         row_count = self._num_of_rows(cursor)
-        print(f'Number of rows: {row_count}')
+        #print(f'Number of rows: {row_count}')
 
         estimated_size = total_size * row_count
 
-        print(f'Estimated size; {estimated_size}')
+        #print(f'Estimated size: {estimated_size}')
         cursor.execute('DROP TABLE temp_table')
         return estimated_size
 
     # auxiliary functions for estimated_query_size
     # <
     def _field_length(self, column_type):
+        """"
+        Finds a given length of data in data types like CHAR(2), VARCHAR(10), etc.
+        If the length is not specified returns 1.
+        """
         num = re.findall(r'\d+', column_type)
         if num:
             return int(num[0])
@@ -123,7 +136,9 @@ class db_connection():
 
     @try_except_decorator
     def _size_of_one_row(self, query, cursor):
-
+        """
+        Estimates the size of one row basing on data types of columns used in the query.
+        """
         create_temp_table_query = """
                 CREATE TEMPORARY TABLE temp_table AS
                 """
@@ -138,7 +153,7 @@ class db_connection():
 
         for column in columns_info:
             column_type = column[1].lower()
-            print(column_type)
+            #print(column_type)
             if 'int' in column_type:
                 length = self._field_length(column_type)
                 total_size += 4 * length
@@ -161,6 +176,9 @@ class db_connection():
 
     @try_except_decorator
     def _num_of_rows(self, cursor):
+        """
+        Counts the number of rows in the query.
+        """
         row_count = 1
         count_query = """
                       SELECT COUNT(*) FROM temp_table;
@@ -172,60 +190,86 @@ class db_connection():
     # >
 
     @try_except_decorator
-    def display_query(self, query, param):
+    def display_query(self, query, param, estsize=False, limit=None):
         """
         Displays the results of select-queries.
         Two options how to display:
         - print to a terminal (if size of query data < 1 Kbytes)
         - write to a dataframe (if size of query data < 1 Gbytes)
+        If estsize is True, before printing information, an estimated size
+        of the query will be calculated.
+        In this case to print data the size of query data must be < 1 Kbytes
+        for printing to a terminal or < 1 Gbytes to a dataframe.
+        Else - the function ends with message 'Too much data to print'.
         """
         
         with self.connection.cursor() as cursor:
 
             if param == 'print':
-                self._print_info(query, cursor)
+                self._print_info(query, cursor, estsize, limit)
                 return 1
             if param == 'dataframe':
-                return self._write_to_df(query, cursor)
+                return self._write_to_df(query, cursor, estsize, limit)
 
     # auxiliary functions for display_query
     # <
-    def _print_info(self, query, cursor, limit=1024*1024):
+    def _print_info(self, query, cursor, estsize, limit):
         """
-        Prints data fetched from a query if its size < {limit} size,
-        default limit = 1 Kbytes
+        Prints data fetched from a query.
+        If estsize == True its size must be < {limit} size,
+        default limit = 1 Kbytes.
         """
-        size_query = self.estimated_query_size(query, cursor)
+        default_limit = 1024*1024
         
-        print(f'Approximate query size: {size_query}')
-        
-        if size_query <= limit:
-            cursor.execute(query)
-            results = cursor.fetchall()
-            for row in results:
-                print(row)
+        if estsize:
+            size_query = self._estimated_query_size(query, cursor)
+            limit = limit if limit else default_limit
+            #print(f'Approximate query size: {size_query}')
+            if size_query <= limit:
+                self._print_query(query, cursor)
+            else:
+                print('Too much data to print')
         else:
-            print('Too much data to print')
+            self._print_query(query, cursor)
+            
 
-    def _write_to_df(self, query, cursor, limit=1024*1024*1024):
+    def _write_to_df(self, query, cursor, estsize, limit):
         """
-        Writes data to a dataframe
-        if its size < {limit} size,
-        default limit = 1 Gbytes
+        Writes data to a dataframe.
+        If estsize == True its size must be < {limit} size,
+        default limit = 1 Gbytes.
         """
-
-        
-        size_query = self.estimated_query_size(query, cursor)
-        print(f'Approximate query size: {size_query}')
-
-        if size_query <= limit:
-            cursor.execute(query)
-            rows = cursor.fetchall()
-            results = pd.DataFrame(rows)
+        default_limit = 1024*1024*1024
+        if estsize:
+            size_query = self._estimated_query_size(query, cursor)
+            limit = limit if limit else default_limit
+            #print(f'Approximate query size: {size_query}')
+            if size_query <= limit:
+                results = pd.DataFrame(self._execute_display_query(query, cursor))
+                return results
+            else:
+                print('Too much data to print')
+                return -100
+        else:
+            results = pd.DataFrame(self._execute_display_query(query, cursor))
             return results
-        else:
-            print('Too much data to print')
-            return -100
+
+    def _execute_display_query(self, query, cursor):
+        """
+        Executes the query using the cursor.
+        """
+        cursor.execute(query)
+        result = cursor.fetchall()
+        return result
+
+    def _print_query(self, query, cursor):
+        """
+        Prints results of the executed query row by row.
+        """
+        results = self._execute_display_query(query, cursor)
+        for row in results:
+            print(row)
+
     # >
 
     @try_except_decorator
@@ -234,10 +278,8 @@ class db_connection():
         Displays simple info like DESCRIBE, SHOW, etc.
         """
         with self.connection.cursor() as cursor:
-            cursor.execute(query)
             print(f'{query}:')
-            for row in cursor:
-                print(row)
+            self._print_query(query, cursor)
 
     @try_except_decorator
     def execute_query_ch(self, query, params=None):
